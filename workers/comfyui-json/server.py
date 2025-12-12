@@ -111,7 +111,7 @@ async def handle_ping(_):
 
 
 async def handle_view(request: web.Request) -> web.Response:
-    """Proxy /view requests to raw ComfyUI server to fetch generated images"""
+    """Proxy /view requests to raw ComfyUI server to fetch generated images/videos"""
     # Forward query params to raw ComfyUI (not the API wrapper)
     query_string = request.query_string
     url = f"{COMFYUI_URL}/view?{query_string}"
@@ -126,7 +126,7 @@ async def handle_view(request: web.Request) -> web.Response:
                     return web.Response(
                         body=content,
                         status=200,
-                        content_type=resp.content_type or "image/png"
+                        content_type=resp.content_type or "application/octet-stream"
                     )
                 else:
                     text = await resp.text()

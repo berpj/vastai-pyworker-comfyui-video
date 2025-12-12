@@ -75,11 +75,11 @@ python -m workers.comfyui-json.client --s3
 
 ### Output
 
-Images are saved to `./generated_images/comfy_{seed}.png`.
+Generated media (images and videos) are saved to `./generated_outputs/comfy_{seed}.*`.
 
 ### S3 Upload (Optional)
 
-You can optionally upload generated images to an S3-compatible storage service (AWS S3, Cloudflare R2, Backblaze B2, etc.) by using the `--s3` flag.
+You can optionally upload generated media to an S3-compatible storage service (AWS S3, Cloudflare R2, Backblaze B2, etc.) by using the `--s3` flag.
 
 **1. Set environment variables:**
 

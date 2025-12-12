@@ -106,34 +106,63 @@ class APIDemo:
         self.s3_client = get_s3_client() if upload_s3 else None
         
         if upload_s3 and not self.s3_client:
-            log.warning("S3 upload requested but client creation failed. Images will only be saved locally.")
+            log.warning("S3 upload requested but client creation failed. Media will only be saved locally.")
 
-    def extract_filename(self, response: dict) -> str | None:
-        """Extract the generated image filename from ComfyUI response"""
-        if "comfyui_response" in response:
-            for data in response["comfyui_response"].values():
-                if isinstance(data, dict) and "outputs" in data:
-                    for node_output in data["outputs"].values():
-                        if "images" in node_output and node_output["images"]:
-                            return node_output["images"][0].get("filename")
-        return None
+    def extract_media(self, response: dict) -> list[dict]:
+        """Extract generated media (images/videos) from ComfyUI response"""
+        media: list[dict] = []
+        comfy_resp = response.get("comfyui_response")
+        if not comfy_resp:
+            return media
 
-    async def save_image(self, worker_url: str, filename: str, local_name: str) -> str | None:
-        """Fetch and save image locally from the worker, optionally upload to S3"""
-        os.makedirs("generated_images", exist_ok=True)
-        return await self._fetch_image(worker_url, filename, local_name)
+        for data in comfy_resp.values():
+            if isinstance(data, dict) and "outputs" in data:
+                for node_output in data["outputs"].values():
+                    for image in node_output.get("images", []):
+                        filename = image.get("filename")
+                        if not filename:
+                            continue
+                        media.append(
+                            {
+                                "filename": filename,
+                                "type": image.get("type", "output"),
+                                "subfolder": image.get("subfolder", ""),
+                                "kind": "image",
+                            }
+                        )
+                    for video in node_output.get("gifs", []):
+                        filename = video.get("filename")
+                        if not filename:
+                            continue
+                        media.append(
+                            {
+                                "filename": filename,
+                                "type": video.get("type", "output"),
+                                "subfolder": video.get("subfolder", ""),
+                                "kind": "video",
+                            }
+                        )
+        return media
 
-    def _upload_to_s3(self, local_path: str, s3_key: str) -> str | None:
+    async def save_media(self, worker_url: str, media: dict, local_name: str) -> str | None:
+        """Fetch and save media locally from the worker, optionally upload to S3"""
+        os.makedirs("generated_outputs", exist_ok=True)
+        return await self._fetch_file(worker_url, media, local_name)
+
+    def _upload_to_s3(
+        self, local_path: str, s3_key: str, content_type: str | None = None
+    ) -> str | None:
         """Upload a local file to S3 and return the S3 URL"""
         if not self.s3_client:
             return None
         
         try:
+            extra_args = {"ContentType": content_type or "application/octet-stream"}
             self.s3_client.upload_file(
                 local_path,
                 S3_BUCKET_NAME,
                 s3_key,
-                ExtraArgs={"ContentType": "image/png"}
+                ExtraArgs=extra_args
             )
             s3_url = f"{S3_ENDPOINT_URL}/{S3_BUCKET_NAME}/{s3_key}"
             print(f"  ☁️  Uploaded to S3: {s3_key}")
@@ -142,28 +171,39 @@ class APIDemo:
             log.error(f"Failed to upload to S3: {e}")
             return None
 
-    async def _fetch_image(self, worker_url: str, filename: str, local_name: str) -> str | None:
-        """Fetch image from worker's /view endpoint and save locally"""
+    async def _fetch_file(self, worker_url: str, media: dict, local_name: str) -> str | None:
+        """Fetch image or video from worker's /view endpoint and save locally"""
         if not worker_url:
+            return None
+
+        filename = media.get("filename")
+        if not filename:
             return None
             
         try:
             url = f"{worker_url}/view"
-            params = {"filename": filename, "type": "output"}
+            params = {
+                "filename": filename,
+                "type": media.get("type", "output"),
+            }
+            if media.get("subfolder"):
+                params["subfolder"] = media["subfolder"]
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, ssl=False) as resp:
                     if resp.status == 200:
-                        path = f"generated_images/{local_name}"
-                        image_data = await resp.read()
+                        path = os.path.join("generated_outputs", local_name)
+                        file_bytes = await resp.read()
                         with open(path, "wb") as f:
-                            f.write(image_data)
+                            f.write(file_bytes)
                         print(f"  💾 Saved: {path}")
                         
+                        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+
                         # Upload to S3 if enabled
                         if self.upload_s3 and self.s3_client:
                             s3_key = f"comfyui/{local_name}"
-                            self._upload_to_s3(path, s3_key)
+                            self._upload_to_s3(path, s3_key, content_type=content_type)
                         
                         return path
             return None
@@ -202,19 +242,25 @@ class APIDemo:
 
         print("\n✅ Generation complete!")
 
-        # Get worker URL for fetching images
+        # Get worker URL for fetching media
         worker_url = response.get("url", "")
         print(f"Worker URL: {worker_url}")
 
-        # Fetch and save image
+        # Fetch and save media (images/videos)
         if "response" in response:
-            filename = self.extract_filename(response["response"])
-            if filename:
-                path = await self.save_image(worker_url, filename, f"comfy_{seed}.png")
-                if not path:
-                    print(f"❌ Failed to fetch image")
+            media_items = self.extract_media(response["response"])
+            if media_items:
+                for idx, media in enumerate(media_items):
+                    ext = os.path.splitext(media.get("filename", ""))[1]
+                    if not ext:
+                        ext = ".mp4" if media.get("kind") == "video" else ".png"
+                    suffix = "" if idx == 0 else f"_{idx}"
+                    local_name = f"comfy_{seed}{suffix}{ext}"
+                    path = await self.save_media(worker_url, media, local_name)
+                    if not path:
+                        print(f"❌ Failed to fetch {media.get('kind', 'file')}: {media.get('filename')}")
             else:
-                print("❌ No image in response")
+                print("❌ No media in response")
         else:
             print("❌ Unexpected response format")
 
@@ -245,13 +291,19 @@ class APIDemo:
         worker_url = response.get("url", "")
 
         if "response" in response:
-            filename = self.extract_filename(response["response"])
-            if filename:
-                path = await self.save_image(worker_url, filename, "workflow.png")
-                if not path:
-                    print(f"❌ Failed to fetch image")
+            media_items = self.extract_media(response["response"])
+            if media_items:
+                for idx, media in enumerate(media_items):
+                    ext = os.path.splitext(media.get("filename", ""))[1]
+                    if not ext:
+                        ext = ".mp4" if media.get("kind") == "video" else ".png"
+                    suffix = "" if idx == 0 else f"_{idx}"
+                    local_name = f"workflow{suffix}{ext}"
+                    path = await self.save_media(worker_url, media, local_name)
+                    if not path:
+                        print(f"❌ Failed to fetch {media.get('kind', 'file')}: {media.get('filename')}")
             else:
-                print("❌ No image in response")
+                print("❌ No media in response")
         else:
             print("❌ Unexpected response format")
 
@@ -268,7 +320,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=DEFAULT_STEPS, help=f"Steps (default: {DEFAULT_STEPS})")
     p.add_argument("--seed", type=int, default=None, help="Seed (default: random)")
     p.add_argument("--s3", action="store_true", 
-                   help="Upload generated images to S3 (requires S3_ENDPOINT_URL, S3_BUCKET_NAME, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY env vars)")
+                   help="Upload generated media to S3 (requires S3_ENDPOINT_URL, S3_BUCKET_NAME, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY env vars)")
     return p
 
 
